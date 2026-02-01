@@ -6,18 +6,17 @@ import os
 import base64
 from datetime import datetime, timedelta
 
-# --- 1. CONFIG & WIDE LAYOUT ---
+# --- 1. CONFIG & WIDE MODE ---
 st.set_page_config(page_title="BYPL Control Room Monitor", layout="wide")
 USER_ID = "1"; USER_PASS = "1"
 
-# --- 2. INDIAN STANDARD TIME (IST) FIX ---
+# --- 2. IST TIME (Corrects the clock) ---
 def get_ist_time():
-    # Streamlit servers are in UTC; add 5.5 hours for India
     return datetime.utcnow() + timedelta(hours=5, minutes=30)
 
-# --- 3. ASSET LOADER (LOGO & CHIME) ---
+# --- 3. ASSET LOADER ---
 def get_base64_file(bin_file):
-    # Checks root and subfolder to avoid "File Not Found" errors
+    # Search root and "SLDC monitor" folder for logo/chime
     paths = [bin_file, os.path.join("SLDC monitor", bin_file), bin_file.lower(), bin_file.upper()]
     for p in paths:
         if os.path.exists(p):
@@ -44,7 +43,7 @@ if not st.session_state.authenticated:
                 st.rerun()
             else:
                 st.error("Invalid credentials")
-    st.stop() # Prevents further code execution until login
+    st.stop() # Stops execution until login
 
 # --- 5. STYLING ---
 st.markdown("""
@@ -64,11 +63,11 @@ with c1:
 with c2:
     st.markdown("<h1 style='text-align: center;'>BYPL INTRADAY DASHBOARD</h1>", unsafe_allow_html=True)
 with c3:
-    st.markdown(f'<div class="clock-box"><p style="color:#888;margin:0">IST TIME</p><p class="clock-text">{ist_now.strftime("%H:%M:%S")}</p></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="clock-box"><p style="color:#888;margin:0">INDIAN STANDARD TIME</p><p class="clock-text">{ist_now.strftime("%H:%M:%S")}</p></div>', unsafe_allow_html=True)
 
 st.divider()
 
-# --- 7. DATA FETCH WITH TIMEOUT PROTECTION ---
+# --- 7. DATA FETCH WITH DISGUISE ---
 def load_csv(name):
     path = name if os.path.exists(name) else os.path.join("SLDC monitor", name)
     if os.path.exists(path): return pd.read_csv(path)
@@ -79,40 +78,27 @@ try:
     fix_load = load_csv('Fix load.csv')
     
     if pm is None:
-        st.error("⚠️ DATA ERROR: 'plant_master.csv' not found. Please check your GitHub files.")
+        st.error("⚠️ CSV Files missing on GitHub. Ensure plant_master.csv is in the root.")
     else:
         ist_date = ist_now.strftime('%d-%m-%Y')
         url = f"https://www.delhisldc.org/Filesshared/api_response_{ist_date}.json"
         
-        # Disguise the request as a real browser to prevent blocks
+        # This header makes SLDC think the request is from a real laptop browser
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
         
         try:
-            # Increase timeout to 25 seconds for slow international connections
             res = requests.get(url, headers=headers, timeout=25) 
             if res.status_code == 200:
                 data = res.json()
-                rev = data['ResponseBody']['FullSchdRevisionNo']
-                st.success(f"✅ CONNECTED | REVISION {rev} | DATE {ist_date}")
-                
-                # Detect Revision Change for Chime
-                if "last_rev" not in st.session_state: st.session_state.last_rev = rev
-                if rev > st.session_state.last_rev:
-                    chime_b64 = get_base64_file("chime.mp3") or get_base64_file("Chime.mp3")
-                    if chime_b64:
-                        st.markdown(f'<audio autoplay><source src="data:audio/mp3;base64,{chime_b64}"></audio>', unsafe_allow_html=True)
-                    st.session_state.last_rev = rev
-                
-                # Show full dataframe
+                st.success(f"✅ SLDC LIVE FEED ACTIVE | Revision: {data['ResponseBody']['FullSchdRevisionNo']}")
                 st.dataframe(fix_load, use_container_width=True, height=600)
             else:
-                st.warning(f"⚠️ SLDC Website reachable, but data for {ist_date} is not yet published.")
+                st.warning(f"⚠️ SLDC Website is up, but {ist_date} data is not yet published.")
         except Exception:
-            st.error("🚨 CONNECTION TIMEOUT: SLDC is blocking the cloud request. Retrying in 30s...")
+            st.error("🚨 CONNECTION BLOCKED: SLDC is rejecting the cloud request. Retrying in 30s...")
 
 except Exception as e:
     st.error(f"Software Error: {e}")
 
-# Automatically refresh every 30 seconds
 time.sleep(30)
 st.rerun()
