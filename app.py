@@ -6,17 +6,18 @@ import os
 import base64
 from datetime import datetime, timedelta
 
-# --- 1. CONFIG & LAYOUT ---
+# --- 1. CONFIG & WIDE LAYOUT ---
 st.set_page_config(page_title="BYPL Control Room Monitor", layout="wide")
 USER_ID = "1"; USER_PASS = "1"
 
-# --- 2. IST TIME ---
+# --- 2. INDIAN STANDARD TIME (IST) FIX ---
 def get_ist_time():
+    # Streamlit servers are in UTC; add 5.5 hours for India
     return datetime.utcnow() + timedelta(hours=5, minutes=30)
 
-# --- 3. ASSET LOADER ---
+# --- 3. ASSET LOADER (LOGO & CHIME) ---
 def get_base64_file(bin_file):
-    # Checks root and "SLDC monitor" folder for logo/chime
+    # Checks root and subfolder to avoid "File Not Found" errors
     paths = [bin_file, os.path.join("SLDC monitor", bin_file), bin_file.lower(), bin_file.upper()]
     for p in paths:
         if os.path.exists(p):
@@ -43,7 +44,7 @@ if not st.session_state.authenticated:
                 st.rerun()
             else:
                 st.error("Invalid credentials")
-    st.stop() # Stops everything else until login is successful
+    st.stop() # Prevents further code execution until login
 
 # --- 5. STYLING ---
 st.markdown("""
@@ -67,7 +68,7 @@ with c3:
 
 st.divider()
 
-# --- 7. DATA FETCH ---
+# --- 7. DATA FETCH WITH TIMEOUT PROTECTION ---
 def load_csv(name):
     path = name if os.path.exists(name) else os.path.join("SLDC monitor", name)
     if os.path.exists(path): return pd.read_csv(path)
@@ -78,26 +79,40 @@ try:
     fix_load = load_csv('Fix load.csv')
     
     if pm is None:
-        st.error("⚠️ CRITICAL: 'plant_master.csv' not found. Check GitHub root.")
+        st.error("⚠️ DATA ERROR: 'plant_master.csv' not found. Please check your GitHub files.")
     else:
         ist_date = ist_now.strftime('%d-%m-%Y')
         url = f"https://www.delhisldc.org/Filesshared/api_response_{ist_date}.json"
         
+        # Disguise the request as a real browser to prevent blocks
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+        
         try:
-            # INCREASED TIMEOUT to 20 seconds to handle slow SLDC responses
-            res = requests.get(url, timeout=20) 
+            # Increase timeout to 25 seconds for slow international connections
+            res = requests.get(url, headers=headers, timeout=25) 
             if res.status_code == 200:
                 data = res.json()
-                st.success(f"✅ SLDC LIVE FEED ACTIVE | Revision: {data['ResponseBody']['FullSchdRevisionNo']}")
-                # Placeholder for the data table
+                rev = data['ResponseBody']['FullSchdRevisionNo']
+                st.success(f"✅ CONNECTED | REVISION {rev} | DATE {ist_date}")
+                
+                # Detect Revision Change for Chime
+                if "last_rev" not in st.session_state: st.session_state.last_rev = rev
+                if rev > st.session_state.last_rev:
+                    chime_b64 = get_base64_file("chime.mp3") or get_base64_file("Chime.mp3")
+                    if chime_b64:
+                        st.markdown(f'<audio autoplay><source src="data:audio/mp3;base64,{chime_b64}"></audio>', unsafe_allow_html=True)
+                    st.session_state.last_rev = rev
+                
+                # Show full dataframe
                 st.dataframe(fix_load, use_container_width=True, height=600)
             else:
-                st.warning(f"⚠️ SLDC server is up, but {ist_date} data is not yet published.")
+                st.warning(f"⚠️ SLDC Website reachable, but data for {ist_date} is not yet published.")
         except Exception:
             st.error("🚨 CONNECTION TIMEOUT: SLDC is blocking the cloud request. Retrying in 30s...")
 
 except Exception as e:
     st.error(f"Software Error: {e}")
 
+# Automatically refresh every 30 seconds
 time.sleep(30)
 st.rerun()
