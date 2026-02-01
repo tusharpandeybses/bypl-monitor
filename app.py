@@ -6,7 +6,7 @@ import os
 import base64
 from datetime import datetime, timedelta
 
-# --- 1. CONFIG & WIDE MODE ---
+# --- 1. CONFIG & LAYOUT ---
 st.set_page_config(page_title="BYPL Control Room Monitor", layout="wide")
 USER_ID = "1"; USER_PASS = "1"
 
@@ -16,7 +16,7 @@ def get_ist_time():
 
 # --- 3. ASSET LOADER ---
 def get_base64_file(bin_file):
-    # Search root and subfolder
+    # Checks root and "SLDC monitor" folder for logo/chime
     paths = [bin_file, os.path.join("SLDC monitor", bin_file), bin_file.lower(), bin_file.upper()]
     for p in paths:
         if os.path.exists(p):
@@ -24,7 +24,7 @@ def get_base64_file(bin_file):
                 return base64.b64encode(f.read()).decode()
     return None
 
-# --- 4. LOGIN GATE (Must be before any other UI) ---
+# --- 4. LOGIN GATE (FORCED START) ---
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
 
@@ -43,7 +43,7 @@ if not st.session_state.authenticated:
                 st.rerun()
             else:
                 st.error("Invalid credentials")
-    st.stop() # Prevents dashboard from loading until logged in
+    st.stop() # Stops everything else until login is successful
 
 # --- 5. STYLING ---
 st.markdown("""
@@ -67,7 +67,7 @@ with c3:
 
 st.divider()
 
-# --- 7. DATA FETCH WITH TIMEOUT PROTECTION ---
+# --- 7. DATA FETCH ---
 def load_csv(name):
     path = name if os.path.exists(name) else os.path.join("SLDC monitor", name)
     if os.path.exists(path): return pd.read_csv(path)
@@ -77,28 +77,27 @@ try:
     pm = load_csv('plant_master.csv')
     fix_load = load_csv('Fix load.csv')
     
-    if pm is None or fix_load is None:
-        st.error("⚠️ CSV Files (plant_master or Fix load) not found in GitHub!")
+    if pm is None:
+        st.error("⚠️ CRITICAL: 'plant_master.csv' not found. Check GitHub root.")
     else:
         ist_date = ist_now.strftime('%d-%m-%Y')
         url = f"https://www.delhisldc.org/Filesshared/api_response_{ist_date}.json"
         
-        # We wrap the request in a try-except to handle the 'Max Retries' error
         try:
-            res = requests.get(url, timeout=5) # Short timeout to avoid hanging
+            # INCREASED TIMEOUT to 20 seconds to handle slow SLDC responses
+            res = requests.get(url, timeout=20) 
             if res.status_code == 200:
                 data = res.json()
-                st.success(f"✅ SLDC Live Feed Connected | Date: {ist_date}")
+                st.success(f"✅ SLDC LIVE FEED ACTIVE | Revision: {data['ResponseBody']['FullSchdRevisionNo']}")
+                # Placeholder for the data table
                 st.dataframe(fix_load, use_container_width=True, height=600)
             else:
-                st.warning(f"⚠️ SLDC Website is up but data for {ist_date} is not yet available.")
-        except requests.exceptions.RequestException:
-            st.error("🚨 SLDC SERVER DOWN: The Delhi SLDC website is currently unreachable. Retrying in 30 seconds...")
+                st.warning(f"⚠️ SLDC server is up, but {ist_date} data is not yet published.")
+        except Exception:
+            st.error("🚨 CONNECTION TIMEOUT: SLDC is blocking the cloud request. Retrying in 30s...")
 
 except Exception as e:
     st.error(f"Software Error: {e}")
 
-# Refresh the app every 30 seconds
 time.sleep(30)
 st.rerun()
-
