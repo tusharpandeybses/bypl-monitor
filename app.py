@@ -6,7 +6,7 @@ import os
 import base64
 from datetime import datetime, timedelta
 
-# --- 1. CONFIG ---
+# --- 1. CONFIG & WIDE MODE ---
 st.set_page_config(page_title="BYPL Control Room Monitor", layout="wide")
 USER_ID = "1"; USER_PASS = "1"
 
@@ -16,7 +16,7 @@ def get_ist_time():
 
 # --- 3. ASSET LOADER ---
 def get_base64_file(bin_file):
-    # Try multiple common paths for Streamlit Cloud
+    # Search root and subfolder
     paths = [bin_file, os.path.join("SLDC monitor", bin_file), bin_file.lower(), bin_file.upper()]
     for p in paths:
         if os.path.exists(p):
@@ -24,7 +24,7 @@ def get_base64_file(bin_file):
                 return base64.b64encode(f.read()).decode()
     return None
 
-# --- 4. LOGIN GATE (FORCED) ---
+# --- 4. LOGIN GATE (Must be before any other UI) ---
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
 
@@ -43,7 +43,7 @@ if not st.session_state.authenticated:
                 st.rerun()
             else:
                 st.error("Invalid credentials")
-    st.stop()
+    st.stop() # Prevents dashboard from loading until logged in
 
 # --- 5. STYLING ---
 st.markdown("""
@@ -67,39 +67,38 @@ with c3:
 
 st.divider()
 
-# --- 7. DATA FETCH ---
+# --- 7. DATA FETCH WITH TIMEOUT PROTECTION ---
 def load_csv(name):
     path = name if os.path.exists(name) else os.path.join("SLDC monitor", name)
-    if os.path.exists(path):
-        return pd.read_csv(path)
+    if os.path.exists(path): return pd.read_csv(path)
     return None
 
 try:
     pm = load_csv('plant_master.csv')
     fix_load = load_csv('Fix load.csv')
-    fmt = load_csv('format.csv')
-
+    
     if pm is None or fix_load is None:
-        st.error("⚠️ DATA FILES MISSING: Please ensure plant_master.csv and Fix load.csv are in the GitHub root.")
+        st.error("⚠️ CSV Files (plant_master or Fix load) not found in GitHub!")
     else:
-        # API URL for Today
         ist_date = ist_now.strftime('%d-%m-%Y')
         url = f"https://www.delhisldc.org/Filesshared/api_response_{ist_date}.json"
-        res = requests.get(url, timeout=10)
         
-        if res.status_code == 200:
-            data = res.json()
-            rev = data['ResponseBody']['FullSchdRevisionNo']
-            st.success(f"✅ CONNECTED | REVISION {rev} | DATE {ist_date}")
-            
-            # (Insert your process_data function logic here to fill the dataframe)
-            # For now, showing a placeholder table to verify layout
-            st.dataframe(fmt if fmt is not None else fix_load, use_container_width=True, height=600)
-        else:
-            st.warning(f"🔄 SLDC Server hasn't published data for {ist_date} yet.")
+        # We wrap the request in a try-except to handle the 'Max Retries' error
+        try:
+            res = requests.get(url, timeout=5) # Short timeout to avoid hanging
+            if res.status_code == 200:
+                data = res.json()
+                st.success(f"✅ SLDC Live Feed Connected | Date: {ist_date}")
+                st.dataframe(fix_load, use_container_width=True, height=600)
+            else:
+                st.warning(f"⚠️ SLDC Website is up but data for {ist_date} is not yet available.")
+        except requests.exceptions.RequestException:
+            st.error("🚨 SLDC SERVER DOWN: The Delhi SLDC website is currently unreachable. Retrying in 30 seconds...")
 
 except Exception as e:
-    st.error(f"System Error: {e}")
+    st.error(f"Software Error: {e}")
 
+# Refresh the app every 30 seconds
 time.sleep(30)
 st.rerun()
+
