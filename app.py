@@ -1,39 +1,24 @@
 import streamlit as st
 import pandas as pd
-import requests
-import time
+import json
 import os
 import base64
 from datetime import datetime, timedelta
 
-# --- 1. CONFIG & WIDE MODE ---
-st.set_page_config(page_title="BYPL Control Room Monitor", layout="wide")
+# --- 1. SETTINGS & LAYOUT ---
+st.set_page_config(page_title="BYPL Intraday Dashboard", layout="wide")
 USER_ID = "1"; USER_PASS = "1"
 
-# --- 2. IST TIME (Corrects the clock) ---
 def get_ist_time():
     return datetime.utcnow() + timedelta(hours=5, minutes=30)
 
-# --- 3. ASSET LOADER ---
-def get_base64_file(bin_file):
-    # Search root and "SLDC monitor" folder for logo/chime
-    paths = [bin_file, os.path.join("SLDC monitor", bin_file), bin_file.lower(), bin_file.upper()]
-    for p in paths:
-        if os.path.exists(p):
-            with open(p, 'rb') as f:
-                return base64.b64encode(f.read()).decode()
-    return None
-
-# --- 4. LOGIN GATE (FORCED START) ---
+# --- 2. LOGIN GATE ---
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
 
 if not st.session_state.authenticated:
     _, col2, _ = st.columns([1, 1, 1])
     with col2:
-        logo_b64 = get_base64_file("logo.png") or get_base64_file("logo.PNG")
-        if logo_b64:
-            st.markdown(f'<center><img src="data:image/png;base64,{logo_b64}" width="220"></center>', unsafe_allow_html=True)
         st.title("BYPL System Login")
         u = st.text_input("User ID")
         p = st.text_input("Password", type="password")
@@ -43,62 +28,98 @@ if not st.session_state.authenticated:
                 st.rerun()
             else:
                 st.error("Invalid credentials")
-    st.stop() # Stops execution until login
+    st.stop()
 
-# --- 5. STYLING ---
-st.markdown("""
-    <style>
-    .main { background-color: #0e1117; color: #ffffff; }
-    .clock-box { background-color: #1c2128; padding: 10px; border-radius: 10px; border: 1px solid #00ff00; text-align: center; }
-    .clock-text { font-size: 32px; font-family: 'Courier New'; color: #00ff00; font-weight: bold; margin: 0; }
-    </style>
-    """, unsafe_allow_html=True)
+# --- 3. DATA ENGINE (FULL BYPL LOGIC) ---
+def clean_key(text):
+    return str(text).replace(" ", "").replace("_", "").upper().strip()
 
-# --- 6. HEADER ---
+def process_sldc_data(api_json):
+    try:
+        # Load local master files
+        pm = pd.read_csv('plant_master.csv')
+        fix_load = pd.read_csv('Fix load.csv')
+        
+        pm['clean_rldc'] = pm['RLDC'].apply(clean_key)
+        rldc_map = dict(zip(pm['clean_rldc'], pm['SLDC Code']))
+        ent_map = dict(zip(pm['SLDC Code'], pm['ENT %AGE']))
+        
+        plant_cols = [c for c in fix_load.columns if c not in ['month', 'day', 'Period', 'Time Slot']]
+        results = {c: [0.0]*96 for c in plant_cols}
+        
+        for group in api_json.get('ResponseBody', {}).get('GroupWiseDataList', []):
+            for item in group['FullschdList']:
+                seller = clean_key(item.get('SellerAcronym', ''))
+                buyer = item.get('BuyerAcronym', '').strip()
+                
+                # Resolve Plant Name
+                sldc_name = rldc_map.get(seller)
+                if not sldc_name:
+                    if "ALFANR" in seller: sldc_name = "ALFANR_II"
+                    elif "SECI" in seller: sldc_name = "SECI_BYPL"
+
+                if sldc_name and (sldc_name in results or sldc_name == "TEHRIPSP"):
+                    # Calculate BYPL Share
+                    share = 1.0 if buyer == "BYPL" else (float(ent_map.get(sldc_name, 0))/100.0 if buyer == "DELHI" else 0)
+                    if share <= 0: continue
+                    
+                    # Extract 96-block MW data
+                    sd = item.get('FullScheduleData', {})
+                    isgs = sd.get('ISGSFullScheduleJsonData', {})
+                    mw = [0.0]*96
+                    if isgs:
+                        for k in ['ISGSThermalFullScheduleJsonData', 'ISGSHydroFullScheduleJsonData', 'ISGSGasFullScheduleJsonData']:
+                            sub = isgs.get(k)
+                            if sub: mw = sub.get('TotalDrwBoundarySchdAmount') or sub.get('SchdAmount') or [0.0]*96
+                    else:
+                        mw = sd.get('OAFullScheduleJsonData', {}).get('SchdAmount', [0.0]*96)
+                    
+                    for i in range(96):
+                        val = round(float(mw[i]) * share, 2)
+                        if sldc_name == "TEHRIPSP":
+                            if val < 0: results["TEHRIPSP_P"][i] += val
+                            else: results["TEHRIPSP"][i] += val
+                        elif sldc_name in results:
+                            results[sldc_name][i] += val
+        
+        # Merge with Format
+        final_df = pd.read_csv('format.csv') if os.path.exists('format.csv') else pd.DataFrame({'Period': range(1, 97)})
+        for col in plant_cols:
+            if col in results: final_df[col] = results[col]
+        return final_df
+    except Exception as e:
+        st.error(f"Processing Error: {e}")
+        return None
+
+# --- 4. MAIN DASHBOARD UI ---
 ist_now = get_ist_time()
-c1, c2, c3 = st.columns([1, 2, 1])
-with c1:
-    logo_b64 = get_base64_file("logo.png") or get_base64_file("logo.PNG")
-    if logo_b64: st.markdown(f'<img src="data:image/png;base64,{logo_b64}" width="180">', unsafe_allow_html=True)
-with c2:
-    st.markdown("<h1 style='text-align: center;'>BYPL INTRADAY DASHBOARD</h1>", unsafe_allow_html=True)
-with c3:
-    st.markdown(f'<div class="clock-box"><p style="color:#888;margin:0">INDIAN STANDARD TIME</p><p class="clock-text">{ist_now.strftime("%H:%M:%S")}</p></div>', unsafe_allow_html=True)
+col1, col2 = st.columns([3, 1])
+with col1:
+    st.title("⚡ BYPL Intraday Control Room")
+with col2:
+    st.metric("Indian Standard Time", ist_now.strftime("%H:%M:%S"))
 
-st.divider()
-
-# --- 7. DATA FETCH WITH DISGUISE ---
-def load_csv(name):
-    path = name if os.path.exists(name) else os.path.join("SLDC monitor", name)
-    if os.path.exists(path): return pd.read_csv(path)
-    return None
-
-try:
-    pm = load_csv('plant_master.csv')
-    fix_load = load_csv('Fix load.csv')
+# --- 5. DATA LOADING (FROM BRIDGE) ---
+if os.path.exists("sldc_data.json"):
+    with open("sldc_data.json", "r") as f:
+        api_data = json.load(f)
     
-    if pm is None:
-        st.error("⚠️ CSV Files missing on GitHub. Ensure plant_master.csv is in the root.")
+    rev = api_data.get('ResponseBody', {}).get('FullSchdRevisionNo', 'N/A')
+    st.success(f"✅ Data Active | SLDC Revision: {rev} | Date: {ist_now.strftime('%d-%m-%Y')}")
+    
+    # Run the engine
+    df = process_sldc_data(api_data)
+    
+    if df is not None:
+        # Highlight current block
+        curr_blk = (ist_now.hour * 4) + (ist_now.minute // 15) + 1
+        st.info(f"Current Operating Block: {curr_blk}")
+        
+        # Display full 96-block schedule
+        st.dataframe(df.style.highlight_max(axis=0), use_container_width=True, height=600)
     else:
-        ist_date = ist_now.strftime('%d-%m-%Y')
-        url = f"https://www.delhisldc.org/Filesshared/api_response_{ist_date}.json"
-        
-        # This header makes SLDC think the request is from a real laptop browser
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
-        
-        try:
-            res = requests.get(url, headers=headers, timeout=25) 
-            if res.status_code == 200:
-                data = res.json()
-                st.success(f"✅ SLDC LIVE FEED ACTIVE | Revision: {data['ResponseBody']['FullSchdRevisionNo']}")
-                st.dataframe(fix_load, use_container_width=True, height=600)
-            else:
-                st.warning(f"⚠️ SLDC Website is up, but {ist_date} data is not yet published.")
-        except Exception:
-            st.error("🚨 CONNECTION BLOCKED: SLDC is rejecting the cloud request. Retrying in 30s...")
+        st.warning("Data found but could not be processed. Check CSV files.")
+else:
+    st.warning("🔄 Waiting for GitHub Action to sync data...")
+    st.info("Please trigger the 'Update SLDC Data' workflow in the Actions tab on GitHub.")
 
-except Exception as e:
-    st.error(f"Software Error: {e}")
-
-time.sleep(30)
-st.rerun()
